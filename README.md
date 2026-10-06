@@ -1,70 +1,261 @@
-# Group Project for Advanced Statistics for Physical Analysis
+# QUAX Streaming Data Processing Pipeline
 
-## Modeling Anthropogenic CO2 Accumulation: A Bayesian Comparison of Linear and Accelerating Trends
+## Overview
 
-## Git & GitHub Collaboration Workflow
+This project implements a **quasi real-time streaming pipeline** for processing data from the QUAX experiment. The main goal is to build a system capable of:
 
-Since we are three people working on this project, we have organized the repository so that each person edits their own specific files:
-* **Code:** Each person has their own files in the `code/` folder (e.g., `code/EDA/`, `code/Inference/`, `code/Prediction/`).
-* **Report:** Each person writes their portion of the report in their own text file within `report/texts/` (e.g., `ALVARO.md`, `CARLOS.md`, etc.).
+-   Processing detector data in near real-time
+-   Monitoring detector performance live
+-   Handling large-scale continuous data streams efficiently
 
-By always working in separate files, we can mostly avoid complex merge conflicts. However, it's very important to keep your local repository in sync with the GitHub repository.
+The system is designed as a **streaming ETL pipeline** using Kafka + distributed processing (Dask or PySpark) + live visualization tools.
 
-### Standard Workflow (Every time you work)
+------------------------------------------------------------------------
 
-Follow these steps every time you sit down to work on the project to ensure everything goes smoothly:
+## Scientific Context
 
-#### 1. Pull the latest changes 
-Always pull before you start working so you have your teammates' latest updates:
-```bash
-git checkout main
-git pull origin main
+The QUAX experiment searches for **axions**, hypothetical particles proposed to solve the strong CP problem in Quantum Chromodynamics (QCD). Axions are also a potential dark matter candidate.
+
+Astrophysical constraints suggest an axion mass range:
+
+-   ( 1 ,\mu eV \< m \< 10 , meV )
+
+### Detection Principle
+
+QUAX uses:
+
+-   A **copper cavity**
+-   A **static magnetic field (8.1 T)**
+-   Cryogenic temperatures (\~150 mK)
+
+Axions may couple to photons and produce a weak **radio-frequency signal**, amplified using a **Josephson parametric amplifier**.
+
+------------------------------------------------------------------------
+
+## Data Acquisition
+
+The experiment generates two synchronized data streams:
+
+-   `duck_i` → In-phase component (I)
+-   `duck_q` → Quadrature component (Q)
+
+Each sample:
+
+-   32-bit float (little-endian)
+-   ADC sampling rate: **2 MS/s**
+-   Data throughput: **128 Mbps (\~16 MB/s)**
+
+Each file contains:
+
+-   ( 2\^{23} ) samples
+-   Duration per file pair: \~4.2 seconds
+
+A full run produces thousands of scans over long periods (hours to weeks).
+
+------------------------------------------------------------------------
+
+## Data Structure
+
+Files are stored in a CloudVeneto S3 bucket:
+
+-   Bucket: `quax`
+-   Access: Cloud object storage (Swift-compatible)
+
+Each dataset consists of:
+
+-   `duck_i.dat`
+-   `duck_q.dat`
+
+Each pair represents a continuous acquisition segment.
+
+------------------------------------------------------------------------
+
+## Data Processing Pipeline
+
+The processing consists of two main steps:
+
+### 1. FFT per Scan
+
+Each scan is transformed from time domain to frequency domain using:
+
+-   FFT size: ( n\_{bins} = 2\^{11} = 2048 )
+-   Full bandwidth: **-1 MHz to 1 MHz**
+
+Each file produces:
+
+-   \~4096 FFTs per batch
+
+### 2. Averaging
+
+For each batch:
+
+-   Compute FFT for each scan
+-   Average all FFTs
+-   Compute standard deviation per frequency bin
+
+Output:
+
+-   Averaged power spectrum
+-   Error estimates per bin
+
+------------------------------------------------------------------------
+
+## Streaming Architecture
+
+The system is built as a **Kafka-based pipeline**:
+
+```         
+Kafka Producer → Kafka Topic (raw data) → Dask/PySpark → Kafka Topic (processed data) → Consumer Dashboard
 ```
 
-#### 2. Work on your files
-Edit your specific files in `code/*/` or `report/texts/`. Save your changes.
+### Components
 
-#### 3. Check your status
-See which files you have modified:
-```bash
-git status
+#### 1. Data Emulator (Producer)
+
+-   Reads stored `.dat` files
+-   Simulates real-time acquisition
+-   Emits file pairs every \~5 seconds (configurable)
+
+#### 2. Stream Processing Layer
+
+Implemented with:
+
+-   Dask (preferred) or PySpark
+
+Responsibilities:
+
+-   Decode binary files
+-   Split into scans
+-   Perform FFT in parallel
+-   Compute averaged spectrum
+-   Generate summary statistics
+
+Output format (example):
+
+``` json
+{
+  "average": {
+    "frequency": [...],
+    "value": [...],
+    "rms": [...]
+  }
+}
 ```
 
-#### 4. Stage your changes
-Add the specific files you worked on. (Try to avoid `git add .` unless you are sure you only touched your files).
-```bash
-# Example: Adding your code and report files
-git add code/EDA/test.R
-git add report/texts/ALVARO.md
+-   Send results to Kafka topic
+
+------------------------------------------------------------------------
+
+#### 3. Live Monitoring Dashboard
+
+A consumer application:
+
+-   Reads processed Kafka topic
+
+-   Updates plots every \~5 seconds
+
+-   Displays:
+
+    -   Current batch spectrum
+    -   Error bars (RMS)
+    -   Optional cumulative spectrum
+
+Recommended tools:
+
+-   matplotlib / pyplot
+-   Bokeh (for interactive dashboard)
+
+------------------------------------------------------------------------
+
+## System Goals
+
+### Scientific Goals
+
+-   Detect potential axion-induced spectral excess
+-   Monitor detector stability in real time
+-   Identify anomalies during long acquisition runs
+
+### Engineering Goals
+
+-   Build a scalable streaming ETL system
+-   Ensure near real-time processing
+-   Handle high-throughput scientific data
+
+------------------------------------------------------------------------
+
+## Why Streaming?
+
+This approach is necessary because:
+
+-   Data is produced continuously at high rate
+-   Storage on DAQ servers is limited
+-   Long runs require live validation
+-   Early anomaly detection is critical
+
+------------------------------------------------------------------------
+
+## Development Strategy
+
+Recommended workflow:
+
+1.  Implement processing for a **single batch (static)**
+2.  Extend to **batch processing with Dask/PySpark**
+3.  Add **Kafka streaming layer**
+4.  Build **live dashboard consumer**
+5.  Optimize throughput and latency
+
+------------------------------------------------------------------------
+
+## Hints
+
+-   Start simple before scaling to streaming
+-   Use low-level APIs (Dask Bags / RDDs) initially if needed
+-   Ensure efficient binary parsing (`struct.unpack`)
+-   Design Kafka messages carefully (avoid oversized payloads)
+-   Keep pipeline modular for debugging
+
+------------------------------------------------------------------------
+
+## Final Architecture Summary
+
+-   **Producer** → simulates DAQ stream
+-   **Kafka topic (raw)** → buffers file pairs
+-   **Distributed processing layer** → FFT + averaging
+-   **Kafka topic (processed)** → results stream
+-   **Consumer dashboard** → real-time visualization
+
+``` mermaid
+flowchart LR
+
+%% =====================
+%% DATA GENERATION
+%% =====================
+A[QUAX DAQ Archive\n(.dat files: duck_i / duck_q)] --> B[Stream Emulator Producer]
+
+B -->|Kafka topic: raw_stream| C[(Kafka Broker\nraw data topic)]
+
+%% =====================
+%% PROCESSING LAYER
+%% =====================
+C --> D[Dask / PySpark Cluster]
+
+D --> D1[Binary Parser\n(struct unpack)]
+D1 --> D2[Scan Segmentation]
+D2 --> D3[FFT per scan\n(2048 bins)]
+D3 --> D4[Batch Averaging\n+ RMS computation]
+
+D4 -->|processed spectra| E[(Kafka Broker\nresults topic)]
+
+%% =====================
+%% CONSUMPTION LAYER
+%% =====================
+E --> F[Live Consumer Service]
+
+F --> F1[Real-time Plotter\nMatplotlib / Bokeh]
+F1 --> G[Live Dashboard\nDetector Monitoring]
+
+%% =====================
+%% OPTIONAL STORAGE
+%% =====================
+E --> H[(Optional Storage\nHDFS / S3 / Filesystem)]
 ```
-
-#### 5. Commit your changes
-Write a short, descriptive message about what you did:
-```bash
-git commit -m "Update EDA analysis and add draft to report"
-```
-
-#### 6. Pull and Push
-Before pushing, it's a good practice to pull one more time in case someone else pushed changes while you were working.
-```bash
-# Fetch and merge any new changes 
-git pull origin main
-
-# Push your changes to GitHub
-git push origin main
-```
-
-### Dealing with Merge Conflicts
-
-Since we are working on separate files, conflicts should be rare. However, if you and a teammate accidentally edit the same file (like the `main.pdf` or this `README.md`) at the same time, Git will warn you about a conflict when you `pull`.
-
-If that happens:
-1. Open the conflicted file. Git will mark the conflict with `<<<<<<<`, `=======`, and `>>>>>>>`. 
-2. Edit the file to keep what you need, and delete those markers.
-3. Save the file.
-4. Add and commit the resolved file:
-   ```bash
-   git add <conflicted_file>
-   git commit -m "Resolve merge conflict in <file>"
-   git push origin main
-   ```
